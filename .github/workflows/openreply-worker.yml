@@ -1,0 +1,58 @@
+name: OpenReply worker (hourly burst)
+
+# The worker is a long-running daemon on a normal host. Here it runs as an
+# hourly burst instead: each run drains the BullMQ send queue (comment-to-DM
+# private replies + public replies) and lets the built-in polling reconciler
+# sweep for any comments the webhook missed (72h lookback). Meta allows
+# private replies up to 7 days after a comment, so an hourly cadence never
+# loses a DM.
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: openreply-worker
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Fetch Prisma schema engine (postinstall is skipped above)
+        run: |
+          HASH=$(node -p "require('./node_modules/@prisma/engines-version/package.json').version.split('-').pop()")
+          cd node_modules/@prisma/engines
+          curl -fsSL -o /tmp/schema-engine.gz "https://binaries.prisma.sh/all_commits/${HASH}/debian-openssl-3.0.x/schema-engine.gz"
+          gunzip -c /tmp/schema-engine.gz > schema-engine-debian-openssl-3.0.x
+          chmod +x schema-engine-debian-openssl-3.0.x
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Run worker burst (10 minutes max)
+        run: timeout 600 npm run worker || test $? -eq 124
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          NEXTAUTH_URL: ${{ secrets.NEXTAUTH_URL }}
+          NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+          META_GRAPH_API_VERSION: v25.0
+          INSTAGRAM_APP_ID: ${{ secrets.INSTAGRAM_APP_ID }}
+          INSTAGRAM_APP_SECRET: ${{ secrets.INSTAGRAM_APP_SECRET }}
+          FACEBOOK_APP_SECRET: ${{ secrets.FACEBOOK_APP_SECRET }}
+          WEBHOOK_VERIFY_TOKEN: ${{ secrets.WEBHOOK_VERIFY_TOKEN }}
